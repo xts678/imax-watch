@@ -388,12 +388,19 @@ def match_target(title: str, cfg: dict) -> bool:
 # --------------------------------------------------------------------------
 # 扫描
 # --------------------------------------------------------------------------
+def looks_blocked(html: str) -> bool:
+    """猫眼限流/风控时会返回「验证中心」页（约 5KB），不是正常页面。"""
+    return ("验证中心" in html) or (len(html) < 6000 and "cinema-name" not in html)
+
+
 def discover_cinemas(client: Client, cfg: dict) -> list:
-    html = client.get(IMAX_CINEMA_URL.format(city_id=cfg["city_id"]),
-                      referer=BASE + "/cinemas")
+    url = IMAX_CINEMA_URL.format(city_id=cfg["city_id"])
+    html = client.get(url, referer=BASE + "/cinemas")
     cinemas = parse_imax_cinemas(html)
     if not cinemas:
-        raise RuntimeError("没解析到 IMAX 影院，猫眼页面可能改版或被拦截")
+        if looks_blocked(html):
+            raise RuntimeError(f"影院列表页被拦（返回「验证中心」{len(html)} 字节），疑似限流")
+        raise RuntimeError("没解析到 IMAX 影院，猫眼页面可能改版")
     return cinemas
 
 
@@ -407,8 +414,8 @@ def scan(client: Client, cfg: dict, cinemas: list) -> tuple:
         url = CINEMA_URL.format(cid=cid)
         try:
             html = client.get(url, referer=IMAX_CINEMA_URL.format(city_id=cfg["city_id"]))
-            if len(html) < 5000:
-                raise ValueError(f"返回内容过短（{len(html)} 字节），疑似被拦截")
+            if looks_blocked(html):
+                raise ValueError(f"被拦/限流（返回「验证中心」{len(html)} 字节）")
             movies = parse_cinema_page(html)
         except Exception as exc:
             errors.append({"cinema": c["name"], "error": str(exc)})
@@ -1011,12 +1018,15 @@ def load_state(path: Path) -> dict:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             log.warning("状态文件损坏，重新开始")
-    return {"version": 1, "alerts": {}, "max_dates": {}, "history": [], "pending": []}
+    return {"version": 1, "alerts": {}, "max_dates": {}, "history": [], "pending": [], "cinemas": {}}
 
 
 def save_state(path: Path, state: dict) -> None:
+    # 固定用 LF：Windows 上默认会写 CRLF，和 Linux 上的 CI 一对比就变成"文件变了"，
+    # 云端每轮都会白提交一次。
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(state, ensure_ascii=False, indent=2))
     tmp.replace(path)
 
 
@@ -1075,7 +1085,20 @@ def run_cycle(client: Client, cfg: dict, state: dict, notify: bool) -> dict:
     t0 = time.time()
     now = datetime.now()
 
-    discovered = discover_cinemas(client, cfg)
+    # 影院列表页有独立的限流，挂了就用上次成功抓到的清单兜底
+    try:
+        discovered = discover_cinemas(client, cfg)
+        fresh = [{"id": c["id"], "name": c["name"]} for c in discovered]
+        if (state.get("cinemas") or {}).get("list") != fresh:
+            state["cinemas"] = {"at": now.isoformat(timespec="seconds"), "list": fresh}
+            log.info("影院清单已更新（%d 家）", len(fresh))
+    except Exception as exc:
+        cached = (state.get("cinemas") or {}).get("list") or []
+        if not cached:
+            raise
+        log.warning("影院列表页不可用（%s），改用缓存清单 %d 家", exc, len(cached))
+        discovered = cached
+
     names = {c["id"]: c["name"] for c in discovered}
     wanted = cfg.get("cinema_ids") or []
     if wanted:
@@ -1223,6 +1246,7 @@ def main(argv=None) -> int:
     ap.add_argument("--test-notify", action="store_true", help="发一条测试通知")
     ap.add_argument("--check-channels", action="store_true", help="逐个体检通知通道，不发送")
     ap.add_argument("--discover", action="store_true", help="只列出现时长沙 IMAX 影院")
+    ap.add_argument("--preflight", action="store_true", help="连通性自检：真抓一次影院列表")
     ap.add_argument("--no-notify", action="store_true", help="不发通知，只打印")
     ap.add_argument("--interval", type=int, help="覆盖循环间隔（秒）")
     ap.add_argument("--release-date", help="覆盖上映日期，如 2026-12-16")
@@ -1269,6 +1293,17 @@ def main(argv=None) -> int:
 
     client = Client(cfg)
     client.bootstrap()
+
+    if args.preflight:
+        try:
+            cinemas = discover_cinemas(client, cfg)
+        except Exception as exc:
+            print(f"❌ 连通性自检失败：{exc}")
+            return 1
+        print(f"✅ 猫眼可达，解析到 {len(cinemas)} 家 IMAX 影院")
+        for c in cinemas[:3]:
+            print(f"   {c['id']} {c['name']}")
+        return 0
 
     if args.discover:
         for c in discover_cinemas(client, cfg):
