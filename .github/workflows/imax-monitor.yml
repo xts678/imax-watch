@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "*/10 * * * *"      # 注意：GitHub 的 cron 会延迟几分钟，属正常
   workflow_dispatch:            # 支持手动点一下跑一轮
+    inputs:
+      test_notify:
+        description: "只发一条测试推送，不扫描"
+        type: boolean
+        default: false
 
 permissions:
   contents: write               # 需要写回去重状态 state.json
@@ -27,9 +32,18 @@ jobs:
           python-version: "3.11"
 
       - name: 连通性自检（猫眼能不能访问）
+        if: ${{ inputs.test_notify != true }}
         run: python imax_presale_monitor.py --preflight
 
+      - name: 测试推送（只在手动勾选时执行）
+        if: ${{ inputs.test_notify == true }}
+        env:
+          IMAX_CLOUD: "1"
+          IMAX_BARK_KEY: ${{ secrets.BARK_KEY }}
+        run: python imax_presale_monitor.py --test-notify
+
       - name: 扫描（命中才推送）
+        if: ${{ inputs.test_notify != true }}
         env:
           IMAX_CLOUD: "1"
           IMAX_BARK_KEY: ${{ secrets.BARK_KEY }}
