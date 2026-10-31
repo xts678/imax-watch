@@ -1,0 +1,61 @@
+name: IMAX 预售监测
+
+# 放到新仓库的 .github/workflows/imax-monitor.yml
+# 每 10 分钟跑一轮；只有"开售了"才推送，平时不打扰。
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"      # 注意：GitHub 的 cron 会延迟几分钟，属正常
+  workflow_dispatch:            # 支持手动点一下跑一轮
+
+permissions:
+  contents: write               # 需要写回去重状态 state.json
+
+concurrency:
+  group: imax-monitor
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 连通性自检（猫眼能不能访问）
+        run: |
+          echo "== 影院列表页 =="
+          curl -sS -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0" \
+            -o /tmp/cin.html \
+            -w "HTTP %{http_code}  %{size_download} bytes  %{time_total}s\n" \
+            "https://www.maoyan.com/cinemas?hallType=2&cityId=70" || true
+          echo "影院条目数：$(grep -c 'cinema-name' /tmp/cin.html || echo 0)"
+          if ! grep -q 'cinema-name' /tmp/cin.html; then
+            echo "::warning::没抓到影院条目，可能被猫眼拦了（换国内云函数，见 README）"
+          fi
+
+      - name: 扫描（命中才推送）
+        env:
+          IMAX_CLOUD: "1"
+          IMAX_BARK_KEY: ${{ secrets.BARK_KEY }}
+          IMAX_PREFERRED: "37816,36884,40502,16229"
+          IMAX_HEARTBEAT_HOURS: "0"
+        run: python imax_presale_monitor.py --once
+
+      - name: 保存去重状态（有变化才提交）
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain state.json 2>/dev/null)" ]; then
+            git config user.name "imax-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: 更新开售去重状态 [skip ci]"
+            git push
+            echo "已提交 state.json"
+          else
+            echo "状态无变化，不提交"
+          fi
