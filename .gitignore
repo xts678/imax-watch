@@ -1,0 +1,9 @@
+# 运行产生的临时文件，不用进仓库
+monitor.log
+latest_report.md
+__pycache__/
+*.pyc
+*.bak
+.DS_Store
+
+# state.json 要提交（去重状态），别加进来
