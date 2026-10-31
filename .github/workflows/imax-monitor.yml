@@ -27,16 +27,7 @@ jobs:
           python-version: "3.11"
 
       - name: 连通性自检（猫眼能不能访问）
-        run: |
-          echo "== 影院列表页 =="
-          curl -sS -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0" \
-            -o /tmp/cin.html \
-            -w "HTTP %{http_code}  %{size_download} bytes  %{time_total}s\n" \
-            "https://www.maoyan.com/cinemas?hallType=2&cityId=70" || true
-          echo "影院条目数：$(grep -c 'cinema-name' /tmp/cin.html || echo 0)"
-          if ! grep -q 'cinema-name' /tmp/cin.html; then
-            echo "::warning::没抓到影院条目，可能被猫眼拦了（换国内云函数，见 README）"
-          fi
+        run: python imax_presale_monitor.py --preflight
 
       - name: 扫描（命中才推送）
         env:
